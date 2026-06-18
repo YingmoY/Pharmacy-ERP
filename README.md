@@ -88,7 +88,7 @@ pnpm run dev
 
 - 前端：http://localhost:5173
 - 主后端：http://localhost:8080
-- AI 服务：http://localhost:9080/ai/api/v1/health
+- AI 服务：http://localhost:9080
 - 医保网关：http://localhost:8088
 
 ## 文档入口
@@ -97,13 +97,3 @@ pnpm run dev
 - 前端：[PharmacyERP_front/README.md](PharmacyERP_front/README.md)
 - AI 服务：[ai-services/README.md](ai-services/README.md)
 - 医保网关：[medicare-gateway/README.md](medicare-gateway/README.md)
-
-## 上传 GitHub 前检查
-
-建议执行：
-
-```powershell
-git status --ignored
-```
-
-确认以下内容不会进入仓库：`MedicareAPISimulation/`、`.env`、`config.local.yaml`、本机 `config.py`、本机 `config.go`、`service_manager.py`、`.venv/`、`node_modules/`、`dist/`、`.exe`、日志和生成目录。
