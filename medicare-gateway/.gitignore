@@ -1,0 +1,10 @@
+.gocache/
+gateway.exe
+*.test
+*.log
+*.go.[0-9]*
+.env
+internal/config/config.go
+docs/generated/
+last_interface_check.json
+rabbitmq_*.json

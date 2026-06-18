@@ -1,0 +1,1008 @@
+openapi: 3.0.3
+info:
+  title: PharmacyERP AI Service API
+  version: 1.0.0
+  description: |
+    智慧药店 ERP AI 辅助子模块接口。
+
+    访问边界：
+    - 药品智能搜索：前端直连，路径前缀为 `/ai/api/v1`，不使用 JWT/Casbin 鉴权，建议通过网关限流。
+    - 发票识别相关接口：ERP 后端本地/内网直连，同样不使用 JWT/Casbin 鉴权，建议仅监听 localhost、Docker 内网或通过防火墙限制来源。
+    - AI 子模块只返回识别结果、候选匹配、置信度和质检提示，不直接创建 ERP 正式业务单据。
+    - 发票转入入库单仍由 ERP 主后端完成。
+servers:
+  - url: /ai/api/v1
+    description: AI 子模块统一前缀
+security: []
+tags:
+  - name: Health
+    description: 健康检查
+  - name: DrugSearch
+    description: 前端直连的药品智能搜索能力
+  - name: InvoiceRecognition
+    description: ERP 后端本地/内网调用的发票识别能力
+  - name: Matching
+    description: 药品、供应商候选匹配能力
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: AI 子模块健康检查
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /drugs/search:
+    post:
+      tags: [DrugSearch]
+      summary: 药品智能搜索
+      description: |
+        前端可直接调用，无需登录鉴权。
+
+        搜索数据源来自数据库 `ai.v_drug_search_source` 视图。该接口可用于销售开单、药品选择、库存查询入口等场景。
+        AI 服务可以综合关键词、别名、拼音、模糊匹配、语义召回与库存信息进行排序。
+      operationId: searchDrugs
+      security: []
+      x-access: frontend-public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DrugSearchRequest'
+            examples:
+              keyword:
+                summary: 普通关键词搜索
+                value:
+                  query: 阿莫西林
+                  search_mode: HYBRID
+                  limit: 10
+                  filters:
+                    only_available: true
+              symptom:
+                summary: 症状词搜索
+                value:
+                  query: 发烧 退热
+                  search_mode: HYBRID
+                  limit: 10
+                  filters:
+                    only_available: true
+      responses:
+        '200':
+          description: 搜索成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrugSearchApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /drugs/{drug_id}:
+    get:
+      tags: [DrugSearch]
+      summary: 查询药品搜索详情
+      description: 前端直连，无需鉴权。用于点击搜索结果后查看更完整的药品与库存摘要。
+      operationId: getDrugSearchDetail
+      security: []
+      x-access: frontend-public
+      parameters:
+        - name: drug_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrugDetailApiResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /drugs/search-feedback:
+    post:
+      tags: [DrugSearch]
+      summary: 提交药品搜索反馈
+      description: 前端直连，无需鉴权。用于记录点击、选择、无结果、结果不准等反馈，辅助后续优化搜索召回和排序。
+      operationId: submitDrugSearchFeedback
+      security: []
+      x-access: frontend-public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DrugSearchFeedbackRequest'
+      responses:
+        '200':
+          description: 提交成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /drugs/match:
+    post:
+      tags: [Matching]
+      summary: 批量匹配发票明细到系统药品候选
+      description: |
+        无需鉴权。主要供 ERP 后端在发票识别后调用，也可供 AI 服务内部流水线调用。
+        返回的是候选药品列表，不代表最终入库药品。最终 `drug_id` 必须由 ERP 前端/后端确认。
+      operationId: matchDrugs
+      security: []
+      x-access: erp-local-or-internal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DrugMatchRequest'
+      responses:
+        '200':
+          description: 匹配成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrugMatchApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /suppliers/match:
+    post:
+      tags: [Matching]
+      summary: 匹配发票供应商名称到系统供应商候选
+      description: |
+        无需鉴权。主要供 ERP 后端在发票识别后调用。
+        返回的是候选供应商列表，不代表最终入库供应商。转入库单时仍必须显式提交 `supplier_id`。
+      operationId: matchSuppliers
+      security: []
+      x-access: erp-local-or-internal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupplierMatchRequest'
+      responses:
+        '200':
+          description: 匹配成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupplierMatchApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /invoices/recognize:
+    post:
+      tags: [InvoiceRecognition]
+      summary: 发票识别
+      description: |
+        ERP 后端本地/内网调用，无需 JWT/Casbin 鉴权。
+
+        该接口接收发票图片或 PDF，返回规范化后的识别结果、候选供应商、候选药品、置信度和质检提示。
+        AI 子模块不负责创建入库单；ERP 后端应保存识别结果到主库 `public.ai_invoice_record`，并在用户人工确认后由 ERP 后端转入 `inbound_order(DRAFT)`。
+      operationId: recognizeInvoice
+      security: []
+      x-access: erp-local-only
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/InvoiceRecognizeMultipartRequest'
+      responses:
+        '200':
+          description: 同步识别完成，或异步任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceRecognizeApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /invoices/jobs/{request_id}:
+    get:
+      tags: [InvoiceRecognition]
+      summary: 查询发票识别任务状态
+      description: ERP 后端本地/内网调用，无需鉴权。仅当 `/invoices/recognize` 使用异步模式时需要轮询。
+      operationId: getInvoiceRecognitionJob
+      security: []
+      x-access: erp-local-only
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceRecognizeApiResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /invoices/quality-check:
+    post:
+      tags: [InvoiceRecognition]
+      summary: 发票识别结果质检
+      description: |
+        ERP 后端本地/内网调用，无需鉴权。
+        用于对 OCR/人工修正后的发票结构化结果进行金额、日期、缺失字段、低置信度等检查。
+      operationId: checkInvoiceResultQuality
+      security: []
+      x-access: erp-local-only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvoiceQualityCheckRequest'
+      responses:
+        '200':
+          description: 检查成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceQualityCheckApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: 请求过于频繁
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PayloadTooLarge:
+      description: 上传文件过大
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnsupportedMediaType:
+      description: 不支持的文件类型
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: 服务内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: AI 模型、OCR 服务或依赖服务不可用
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ApiResponseBase:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: success
+        request_id:
+          type: string
+          example: AI-20260612143000123-000001
+
+    EmptyApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+              example: {}
+
+    ErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          properties:
+            code:
+              type: integer
+              example: 400
+            message:
+              type: string
+              example: invalid request
+            data:
+              nullable: true
+              example: null
+            error:
+              $ref: '#/components/schemas/ErrorDetail'
+
+    ErrorDetail:
+      type: object
+      properties:
+        error_code:
+          type: string
+          example: INVALID_ARGUMENT
+        details:
+          type: array
+          items:
+            type: string
+          example: [query is required]
+
+    HealthResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [status, service_time]
+              properties:
+                status:
+                  type: string
+                  enum: [UP, DEGRADED, DOWN]
+                service_time:
+                  type: string
+                  format: date-time
+                version:
+                  type: string
+                  example: 1.0.0
+                models:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/ModelStatus'
+
+    ModelStatus:
+      type: object
+      properties:
+        module:
+          type: string
+          example: INVOICE_RECOGNITION
+        provider:
+          type: string
+          example: LOCAL_OCR
+        model_name:
+          type: string
+          example: default-invoice-ocr
+        status:
+          type: string
+          enum: [READY, DEGRADED, UNAVAILABLE]
+
+    DrugSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 搜索词，可为药品名、商品名、拼音、规格、厂家、批准文号、条码、症状词等
+          example: 阿莫西林
+        search_mode:
+          type: string
+          enum: [KEYWORD, FUZZY, SEMANTIC, HYBRID]
+          default: HYBRID
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        offset:
+          type: integer
+          minimum: 0
+          default: 0
+        filters:
+          $ref: '#/components/schemas/DrugSearchFilters'
+        context:
+          type: object
+          description: 前端上下文，可用于排序，不作为权限或业务事实
+          properties:
+            scene:
+              type: string
+              enum: [SALE, INBOUND, INVENTORY, GENERAL]
+              default: GENERAL
+            prefer_available:
+              type: boolean
+              default: true
+
+    DrugSearchFilters:
+      type: object
+      properties:
+        only_available:
+          type: boolean
+          description: 是否只返回可售库存大于 0 的药品
+          default: false
+        is_prescription:
+          type: boolean
+          nullable: true
+        is_medicare:
+          type: boolean
+          nullable: true
+        manufacturer:
+          type: string
+          maxLength: 100
+        dosage_form:
+          type: string
+          maxLength: 50
+        storage_condition:
+          type: string
+          maxLength: 100
+        near_expire_only:
+          type: boolean
+          default: false
+
+    DrugSearchApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/DrugSearchResponse'
+
+    DrugSearchResponse:
+      type: object
+      required: [query, total, items]
+      properties:
+        query:
+          type: string
+        normalized_query:
+          type: string
+        search_mode:
+          type: string
+          enum: [KEYWORD, FUZZY, SEMANTIC, HYBRID]
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DrugSearchItem'
+        suggestions:
+          type: array
+          items:
+            type: string
+          description: 搜索建议或纠错词
+
+    DrugSearchItem:
+      type: object
+      required: [drug_id, drug_code, common_name, specification, manufacturer, score]
+      properties:
+        drug_id:
+          type: integer
+          format: int64
+        drug_code:
+          type: string
+        common_name:
+          type: string
+        trade_name:
+          type: string
+          nullable: true
+        specification:
+          type: string
+        dosage_form:
+          type: string
+          nullable: true
+        manufacturer:
+          type: string
+        approval_number:
+          type: string
+          nullable: true
+        barcode:
+          type: string
+          nullable: true
+        unit:
+          type: string
+          nullable: true
+        retail_price:
+          type: string
+          nullable: true
+          example: '12.50'
+        purchase_price:
+          type: string
+          nullable: true
+          example: '8.30'
+        is_prescription:
+          type: boolean
+        is_medicare:
+          type: boolean
+        inventory:
+          $ref: '#/components/schemas/DrugInventorySummary'
+        score:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        match_reason:
+          type: string
+          example: 名称、规格匹配，且有可售库存
+        highlights:
+          type: array
+          items:
+            type: string
+
+    DrugInventorySummary:
+      type: object
+      properties:
+        available_qty:
+          type: integer
+          description: 可售库存，IN_STOCK 且排除 RESERVED 预占
+        in_stock_qty:
+          type: integer
+        reserved_qty:
+          type: integer
+        pending_qty:
+          type: integer
+        abnormal_qty:
+          type: integer
+        near_expire_available_qty:
+          type: integer
+        nearest_expire_date:
+          type: string
+          format: date
+          nullable: true
+
+    DrugDetailApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/DrugSearchItem'
+
+    DrugSearchFeedbackRequest:
+      type: object
+      required: [query, feedback_type]
+      properties:
+        request_id:
+          type: string
+          description: 搜索接口返回的 request_id
+        query:
+          type: string
+          maxLength: 200
+        selected_drug_id:
+          type: integer
+          format: int64
+          nullable: true
+        feedback_type:
+          type: string
+          enum: [CLICK, SELECT, NO_RESULT, BAD_RESULT, MANUAL_CORRECTION]
+        feedback_note:
+          type: string
+          maxLength: 500
+
+    DrugMatchRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/DrugMatchInputItem'
+        limit_per_item:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+
+    DrugMatchInputItem:
+      type: object
+      required: [row_index, drug_name]
+      properties:
+        row_index:
+          type: integer
+          minimum: 1
+        drug_name:
+          type: string
+          maxLength: 200
+        specification:
+          type: string
+          maxLength: 100
+          nullable: true
+        manufacturer:
+          type: string
+          maxLength: 200
+          nullable: true
+        approval_number:
+          type: string
+          maxLength: 100
+          nullable: true
+        barcode:
+          type: string
+          maxLength: 100
+          nullable: true
+
+    DrugMatchApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/DrugMatchResultItem'
+
+    DrugMatchResultItem:
+      type: object
+      required: [row_index, candidates]
+      properties:
+        row_index:
+          type: integer
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/DrugCandidate'
+        best_candidate:
+          $ref: '#/components/schemas/DrugCandidate'
+          nullable: true
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/QualityWarning'
+
+    DrugCandidate:
+      allOf:
+        - $ref: '#/components/schemas/DrugSearchItem'
+        - type: object
+          properties:
+            confidence:
+              type: number
+              format: double
+              minimum: 0
+              maximum: 1
+            candidate_type:
+              type: string
+              enum: [EXACT, FUZZY, SEMANTIC, ALIAS, MANUAL]
+
+    SupplierMatchRequest:
+      type: object
+      required: [supplier_name]
+      properties:
+        supplier_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+
+    SupplierMatchApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [recognized_supplier_name, candidates]
+              properties:
+                recognized_supplier_name:
+                  type: string
+                best_candidate:
+                  $ref: '#/components/schemas/SupplierCandidate'
+                  nullable: true
+                candidates:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/SupplierCandidate'
+
+    SupplierCandidate:
+      type: object
+      required: [supplier_id, supplier_code, name, confidence]
+      properties:
+        supplier_id:
+          type: integer
+          format: int64
+        supplier_code:
+          type: string
+        name:
+          type: string
+        license_no:
+          type: string
+          nullable: true
+        contact_name:
+          type: string
+          nullable: true
+        contact_phone:
+          type: string
+          nullable: true
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        match_reason:
+          type: string
+
+    InvoiceRecognizeMultipartRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: 发票图片或 PDF
+        erp_request_id:
+          type: string
+          maxLength: 100
+          description: ERP 后端传入的链路追踪 ID
+        erp_file_id:
+          type: string
+          maxLength: 100
+          description: ERP 文件表中的 file_id，可选
+        async:
+          type: boolean
+          default: false
+          description: true 表示创建异步任务，ERP 后端通过 jobs 接口轮询
+        match_master_data:
+          type: boolean
+          default: true
+          description: 是否同时匹配系统供应商和药品候选
+        return_raw_response:
+          type: boolean
+          default: false
+          description: 是否返回 OCR/LLM 原始响应；生产环境可关闭以减少响应体
+
+    InvoiceRecognizeApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/InvoiceRecognizeResponse'
+
+    InvoiceRecognizeResponse:
+      type: object
+      required: [request_id, status]
+      properties:
+        request_id:
+          type: string
+          description: AI 服务侧识别任务 ID
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, COMPLETED, FAILED]
+        result:
+          $ref: '#/components/schemas/InvoiceRecognizeResult'
+          nullable: true
+        raw_response:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+
+    InvoiceRecognizeResult:
+      type: object
+      required: [items]
+      properties:
+        recognized_supplier_name:
+          type: string
+          nullable: true
+        supplier_candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/SupplierCandidate'
+        matched_supplier_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: AI 推荐的供应商 ID，仅作候选，不可直接作为业务事实
+        invoice_no:
+          type: string
+          nullable: true
+        invoice_date:
+          type: string
+          format: date
+          nullable: true
+        total_amount:
+          type: string
+          nullable: true
+          example: '1024.50'
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvoiceRecognizeItem'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/QualityWarning'
+
+    InvoiceRecognizeItem:
+      type: object
+      required: [row_index]
+      properties:
+        row_index:
+          type: integer
+          minimum: 1
+        drug_name:
+          type: string
+          nullable: true
+        specification:
+          type: string
+          nullable: true
+        manufacturer:
+          type: string
+          nullable: true
+        approval_number:
+          type: string
+          nullable: true
+        batch_number:
+          type: string
+          nullable: true
+        expire_date:
+          type: string
+          format: date
+          nullable: true
+        quantity:
+          type: string
+          nullable: true
+          description: 使用字符串承载 decimal，避免浮点误差
+          example: '20'
+        unit_price:
+          type: string
+          nullable: true
+          example: '12.50'
+        amount:
+          type: string
+          nullable: true
+          example: '250.00'
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+        matched_drug_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: AI 推荐的药品 ID，仅作候选，不可直接作为业务事实
+        drug_candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/DrugCandidate'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/QualityWarning'
+
+    InvoiceQualityCheckRequest:
+      type: object
+      required: [result]
+      properties:
+        result:
+          $ref: '#/components/schemas/InvoiceRecognizeResult'
+        strict:
+          type: boolean
+          default: false
+          description: true 时将金额不一致、缺少 drug_id 等提升为高等级问题
+
+    InvoiceQualityCheckApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponseBase'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [passed, warnings]
+              properties:
+                passed:
+                  type: boolean
+                warnings:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/QualityWarning'
+
+    QualityWarning:
+      type: object
+      required: [level, message]
+      properties:
+        level:
+          type: string
+          enum: [LOW, MEDIUM, HIGH]
+        code:
+          type: string
+          example: AMOUNT_MISMATCH
+        field:
+          type: string
+          nullable: true
+          example: items[2].amount
+        message:
+          type: string
+          example: 明细金额与数量乘单价不一致，请人工确认
+        suggestion:
+          type: string
+          nullable: true

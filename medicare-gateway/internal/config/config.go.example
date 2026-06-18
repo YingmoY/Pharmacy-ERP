@@ -1,0 +1,96 @@
+package config
+
+import (
+	"log/slog"
+	"os"
+	"strconv"
+	"time"
+)
+
+type Config struct {
+	HTTPAddr        string
+	DatabaseURL     string
+	MedicareBaseURL string
+	RequestTimeout  time.Duration
+	EnableRabbitMQ  bool
+	RabbitURL        string
+	LogLevelText     string
+
+	AreaCode        string
+	InsuplcCode     string
+	FixmedinsCode   string
+	FixmedinsName   string
+	Operator        string
+	OperatorName    string
+	OperatorType    string
+	DefaultCertType string
+	DefaultCertNo   string
+	DefaultPsnNo    string
+}
+
+func Load() Config {
+	return Config{
+		HTTPAddr:        env("MEDICARE_GATEWAY_ADDR", ":8088"),
+		DatabaseURL:     env("MEDICARE_DATABASE_URL", "postgres://your_db_user:your_db_password@127.0.0.1:5432/pharmacy_erp?sslmode=disable&search_path=medicare"),
+		MedicareBaseURL: env("MEDICARE_BASE_URL", "http://localhost:9090/csb"),
+		RequestTimeout:  time.Duration(envInt("MEDICARE_TIMEOUT_SECONDS", 25)) * time.Second,
+		EnableRabbitMQ:  envBool("MEDICARE_ENABLE_RABBITMQ", true),
+		RabbitURL:       env("MEDICARE_RABBIT_URL", "amqp://guest:guest@localhost:5672/"),
+		LogLevelText:    env("MEDICARE_LOG_LEVEL", "info"),
+
+		AreaCode:        env("MEDICARE_AREA_CODE", "320500"),
+		InsuplcCode:     env("MEDICARE_INSUPLC_CODE", "320500"),
+		FixmedinsCode:   env("MEDICARE_FIXMEDINS_CODE", "H00000000001"),
+		FixmedinsName:   env("MEDICARE_FIXMEDINS_NAME", "Demo Pharmacy"),
+		Operator:        env("MEDICARE_OPERATOR", "001"),
+		OperatorName:    env("MEDICARE_OPERATOR_NAME", "Demo Operator"),
+		OperatorType:    env("MEDICARE_OPERATOR_TYPE", "1"),
+		DefaultCertType: env("MEDICARE_DEFAULT_CERT_TYPE", "02"),
+		DefaultCertNo:   env("MEDICARE_DEFAULT_CERT_NO", "replace_with_test_cert_no"),
+		DefaultPsnNo:    env("MEDICARE_DEFAULT_PSN_NO", "replace_with_test_psn_no"),
+	}
+}
+
+func (c Config) LogLevel() slog.Level {
+	switch c.LogLevelText {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func env(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}

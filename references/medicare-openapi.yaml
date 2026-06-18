@@ -1,0 +1,633 @@
+# Medicare Gateway OpenAPI
+# 说明：
+# 1. 本文件描述 ERP 调用“医保网关”的接口，不是 ERP 直接调用 9090 医保模拟服务的接口。
+# 2. 网关会自动补齐医保通用报文头、固定人员/机构信息、inf_time、msgid、sign_no。
+# 3. ERP 默认只需要传业务 input；签到和固定人员查询甚至可以不传 body。
+# 4. 网关当前默认上游医保模拟服务为 http://localhost:9090/csb，对应 docs/generated/interface_test_report.json 中已验证通过的路径。
+openapi: 3.0.3
+info:
+  title: Medicare Pharmacy Gateway API
+  version: 1.0.0
+  description: |
+    Go 医保售药网关 API。
+
+    该网关位于 ERP 系统与本地医保模拟服务之间，负责：
+    - 固定人员/机构信息封装，ERP 无需重复上传人员身份信息。
+    - 9001 签到并保存 sign_no。
+    - 后续交易自动携带最近一次 sign_no。
+    - 记录完整可审计日志到 PostgreSQL 的 medicare.audit_logs。
+    - 对可能超时的接口支持可选 RabbitMQ 异步投递与死信队列。
+
+    已校验接口：
+    9001、1101、2101、2102、3505、3201、3202、2103。
+servers:
+  - url: http://localhost:8088
+    description: 本地医保网关默认地址
+
+tags:
+  - name: Health
+    description: 服务健康检查
+  - name: Sign
+    description: 签到与固定人员信息
+  - name: PharmacySale
+    description: 药店售药结算流程
+  - name: SettlementQuery
+    description: 结算清单与明细查询
+  - name: Audit
+    description: 审计说明，审计数据写入 PostgreSQL 表，不单独开放查询 API
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: 网关健康检查
+      description: |
+        用于确认 Go 网关进程已经启动并可以接收 HTTP 请求。
+        该接口不访问 PostgreSQL、RabbitMQ 或上游医保服务。
+      responses:
+        "200":
+          description: 网关进程可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+
+  /api/sign-in:
+    post:
+      tags: [Sign]
+      summary: 9001 签到
+      operationId: signIn9001
+      description: |
+        ERP 调用该接口即可完成医保 9001 签到。
+
+        网关会使用固定人员和固定机构信息构造医保报文：
+        - opter: 001
+        - opter_name: 医保测试员工
+        - fixmedins_code: H00000000001
+        - fixmedins_name: 测试零售药店
+
+        签到成功后，网关会从医保响应中提取 sign_no，并保存到 medicare.sign_sessions。
+        后续 1101、2101、2102、3505、3201、3202、2103 会自动携带该 sign_no。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            example: {}
+      responses:
+        "200":
+          description: 签到成功，data 为医保原始响应
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+              example:
+                trace_id: 8eb3653d-9d84-4190-82fe-79d32715e702
+                msgid: "202606120137529001dafcefb79c1c"
+                infno: "9001"
+                status: success
+                data:
+                  output:
+                    signinoutb:
+                      sign_no: "5202099"
+                      sign_time: "2026-06-12 01:37:52"
+                  infcode: 0
+                  err_msg: success
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/person:
+    post:
+      tags: [Sign]
+      summary: 1101 固定人员信息获取
+      operationId: queryFixedPerson1101
+      description: |
+        ERP 无需传人员信息。网关会使用固定人员：
+        - certno/mdtrt_cert_no: 320500199001010011
+        - psn_no 默认参考本地医保数据：PSN0001
+
+        如果网关还没有 sign_no，会先自动调用 9001 签到，再调用 1101。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            example: {}
+      responses:
+        "200":
+          description: 固定人员查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+              example:
+                trace_id: 09f5498f-32ad-4abf-b951-067fddf3a7c2
+                msgid: "202606120140001101abcdef1234"
+                infno: "1101"
+                status: success
+                data:
+                  output:
+                    baseinfo:
+                      psn_no: PSN0001
+                      certno: "320500199001010011"
+                      psn_name: 张三
+                  infcode: 0
+                  err_msg: success
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/2101:
+    post:
+      tags: [PharmacySale]
+      summary: 2101 药店预结算
+      operationId: drugstorePresettle2101
+      description: |
+        用于医保药店售药预结算。
+
+        ERP 只需要提交业务 input。网关会自动补：
+        infno、msgid、行政区划、经办人、定点机构、inf_time、sign_no。
+
+        推荐业务 input 可参考：
+        docs/generated/04_csb_2101_drugstore_presettle.json 的 Input 节点。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+            example:
+              erp_order_no: ERP-SALE-20260612-0001
+              input:
+                druginfo:
+                  mdtrt_cert_type: "02"
+                  mdtrt_cert_no: "320500199001010011"
+                  psn_no: PSN0001
+                  med_type: "41"
+                  insutype: "310"
+                  acct_used_flag: "1"
+                  medfee_sumamt: 70.5
+                  begntime: "2026-06-12 10:10:00"
+                  minpacunt_drug_trac_cnt: 0
+                  mcs_trac_cnt: 0
+                drugdetail:
+                  - feedetl_sn: FEE0001
+                    rxno: HIRX0001
+                    rx_circ_flag: "1"
+                    fee_ocur_time: "2026-06-12 10:10:00"
+                    med_list_codg: XA01ABD075A002010200144
+                    medins_list_codg: YD0001
+                    det_item_fee_sumamt: 23.5
+                    cnt: 1
+                    pric: 23.5
+      responses:
+        "200":
+          description: 预结算成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+        "408":
+          $ref: "#/components/responses/Timeout"
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/2102:
+    post:
+      tags: [PharmacySale]
+      summary: 2102 药店结算
+      operationId: drugstoreSettle2102
+      description: |
+        用于正式医保结算。
+
+        成功后请保存 data.output.setlinfo 中的：
+        - setl_id：结算 ID
+        - mdtrt_id：就诊 ID
+        - psn_no：人员编号
+
+        后续 3505 销售上传、3201/3202 查询、2103 撤销会用到这些字段。
+
+        async=true 时，如果 RabbitMQ 可用，网关返回 202 queued；后台 worker 调用医保并写入审计。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+            example:
+              erp_order_no: ERP-SALE-20260612-0001
+              async: false
+              input:
+                druginfo:
+                  mdtrt_cert_type: "02"
+                  mdtrt_cert_no: "320500199001010011"
+                  psn_no: PSN0001
+                  med_type: "41"
+                  insutype: "310"
+                  acct_used_flag: "1"
+                  medfee_sumamt: 70.5
+                  begntime: "2026-06-12 10:10:00"
+                drugdetail:
+                  - feedetl_sn: FEE0001
+                    med_list_codg: XA01ABD075A002010200144
+                    medins_list_codg: YD0001
+                    det_item_fee_sumamt: 23.5
+                    cnt: 1
+                    pric: 23.5
+      responses:
+        "200":
+          description: 结算成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+              example:
+                trace_id: 4dc535af-9d4f-48f9-a91f-17db915a2d94
+                msgid: "2026061201410021021234567890"
+                infno: "2102"
+                status: success
+                data:
+                  output:
+                    setlinfo:
+                      setl_id: "320000178114093181500048798203"
+                      mdtrt_id: "320000178114093181500077040195"
+                      psn_no: PSN0001
+                      medfee_sumamt: 70.5
+                      fund_pay_sumamt: 21.15
+                      acct_pay: 21.15
+                  infcode: 0
+                  err_msg: success
+        "202":
+          $ref: "#/components/responses/Queued"
+        "408":
+          $ref: "#/components/responses/Timeout"
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/3505:
+    post:
+      tags: [PharmacySale]
+      summary: 3505 商品销售上传
+      operationId: goodsSaleUpload3505
+      description: |
+        用于上传药店商品销售明细，通常在 2102 成功后调用。
+
+        业务 input 可参考 docs/generated/07_csb_3505_goods_sale.json 的 Input 节点。
+        建议将 2102 返回的 setl_id 写入 input.selinfo.setl_id。
+
+        async=true 时可异步投递到 RabbitMQ。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+            example:
+              erp_order_no: ERP-SALE-20260612-0001
+              async: false
+              input:
+                selinfo:
+                  med_list_codg: XA01ABD075A002010200144
+                  fixmedins_hilist_id: YD0001
+                  fixmedins_hilist_name: 地方药品
+                  fixmedins_bchno: BATCHTEST001
+                  rtal_docno: SALE0001
+                  setl_id: "320000178114093181500048798203"
+                  psn_no: PSN0001
+                  certno: "320500199001010011"
+                  psn_name: 张三
+                  sel_retn_cnt: 1
+                  finl_trns_pric: 23.5
+      responses:
+        "200":
+          description: 销售上传成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+        "202":
+          $ref: "#/components/responses/Queued"
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/3201:
+    post:
+      tags: [SettlementQuery]
+      summary: 3201 药店结算清单查询
+      operationId: settlementListQuery3201
+      description: |
+        用于查询/核对药店结算清单汇总。
+
+        注意：该接口不是简单按 setl_id 查询，而是按对账汇总参数查询。
+        可根据 2102 返回的 setlinfo 组装：
+        - clr_type：默认 41
+        - setl_optins：可取 setlinfo.clr_optins，缺省 320599
+        - medfee_sumamt、fund_pay_sumamt、acct_pay：来自 setlinfo
+        - stmt_begndate、stmt_enddate：对账日期
+
+        async=true 时可异步投递到 RabbitMQ。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+            example:
+              erp_order_no: ERP-QUERY-3201-0001
+              input:
+                data:
+                  insutype: "310"
+                  clr_type: "41"
+                  setl_optins: "320599"
+                  stmt_begndate: "2026-06-11"
+                  stmt_enddate: "2026-06-11"
+                  medfee_sumamt: 70.5
+                  fund_pay_sumamt: 21.15
+                  acct_pay: 21.15
+                  fixmedins_setl_cnt: 1
+                  refd_setl_flag: "0"
+                  exp_content: ""
+      responses:
+        "200":
+          description: 清单查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+        "202":
+          $ref: "#/components/responses/Queued"
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/3202:
+    post:
+      tags: [SettlementQuery]
+      summary: 3202 药店结算清单明细查询
+      operationId: settlementDetailQuery3202
+      description: |
+        用于按本地明细文件生成/查询结算清单明细。
+
+        file_qury_no 在本地模拟服务中可以是服务端可访问的本地文件路径。
+        文件格式为制表符分隔：
+        setl_id, mdtrt_id, psn_no, medfee_sumamt, fund_pay_sumamt, acct_pay, refd_setl_flag。
+
+        async=true 时可异步投递到 RabbitMQ。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+            example:
+              erp_order_no: ERP-QUERY-3202-0001
+              input:
+                data:
+                  setl_optins: "320599"
+                  stmt_begndate: "2026-06-11"
+                  stmt_enddate: "2026-06-11"
+                  medfee_sumamt: 70.5
+                  fund_pay_sumamt: 21.15
+                  cash_payamt: 0
+                  fixmedins_setl_cnt: 1
+                  clr_type: "41"
+                  file_qury_no: "C:/Yingmo/停课不停学/3-2 Comprehensive Design/Code/cloud-api-server-main/docs/generated/stmt_detail_3202.txt"
+                  exp_content: ""
+      responses:
+        "200":
+          description: 明细查询成功，返回文件信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+        "202":
+          $ref: "#/components/responses/Queued"
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/2103:
+    post:
+      tags: [PharmacySale]
+      summary: 2103 药店结算撤销
+      operationId: drugstoreSettleCancel2103
+      description: |
+        用于撤销一笔已成功的药店结算。
+
+        输入需要使用 2102 返回的 setl_id、mdtrt_id、psn_no。
+        注意：不要对同一笔结算同时执行 2601 冲正和 2103 撤销。
+
+        async=true 时可异步投递到 RabbitMQ；失败消息会进入死信队列。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+            example:
+              erp_order_no: ERP-CANCEL-20260612-0001
+              async: false
+              input:
+                data:
+                  setl_id: "320000178114093181500048798203"
+                  mdtrt_id: "320000178114093181500077040195"
+                  psn_no: PSN0001
+      responses:
+        "200":
+          description: 撤销成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+        "202":
+          $ref: "#/components/responses/Queued"
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+  /api/{infno}:
+    post:
+      tags: [PharmacySale]
+      summary: 通用医保交易入口
+      operationId: genericMedicareCall
+      description: |
+        通用入口，当前网关只允许以下 infno：
+        9001、1101、2101、2102、2103、3505、3201、3202。
+
+        推荐 ERP 使用上面列出的明确路径；该通用入口主要用于客户端生成器或统一调用器。
+      parameters:
+        - name: infno
+          in: path
+          required: true
+          description: 医保接口编号
+          schema:
+            type: string
+            enum: ["9001", "1101", "2101", "2102", "2103", "3505", "3201", "3202"]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ERPBusinessRequest"
+      responses:
+        "200":
+          description: 调用成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayResponse"
+        "202":
+          $ref: "#/components/responses/Queued"
+        "404":
+          description: 不支持的 infno
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+              example:
+                error: unsupported medicare infno
+        "502":
+          $ref: "#/components/responses/UpstreamFailed"
+
+components:
+  responses:
+    Queued:
+      description: 异步任务已入队
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayResponse"
+          example:
+            trace_id: 92c4b37a-ef93-494c-9927-6be568f2f2fa
+            msgid: "202606120142002102abcdef1234"
+            infno: "2102"
+            status: queued
+    Timeout:
+      description: 网关调用上游医保服务超时或请求被取消
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayResponse"
+          example:
+            trace_id: 8736cad7-0b38-4ca9-9907-17da6841dfdf
+            msgid: "202606120142002102abcdef1234"
+            infno: "2102"
+            status: failed
+            error: context deadline exceeded
+    UpstreamFailed:
+      description: 上游医保服务返回失败或网络调用失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayResponse"
+          example:
+            trace_id: 73f6305d-faf0-4f1b-8cf1-b49cd5e65d19
+            msgid: "202606120142002102abcdef1234"
+            infno: "2102"
+            status: failed
+            error: 上游医保服务错误
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ERPBusinessRequest:
+      type: object
+      description: |
+        ERP 调用网关的统一请求体。
+
+        input 为医保业务入参节点。网关会自动封装医保通用头，不需要 ERP 传 infno、msgid、sign_no、fixmedins_code 等字段。
+
+        兼容字段：
+        - input：推荐小写字段。
+        - Input：兼容已有医保示例 JSON 的大写字段。
+      properties:
+        erp_order_no:
+          type: string
+          description: ERP 单号，用于审计追踪；会写入 medicare.audit_logs.erp_order_no。
+          example: ERP-SALE-20260612-0001
+        async:
+          type: boolean
+          description: |
+            是否异步处理。仅 2102、2103、3505、3201、3202 适合异步。
+            RabbitMQ 不可用时，网关会自动退回同步调用。
+          default: false
+        input:
+          type: object
+          additionalProperties: true
+          description: 医保业务入参，直接映射到上游医保报文的 Input 节点。
+        Input:
+          type: object
+          additionalProperties: true
+          description: 兼容字段；如果 input 为空，网关会读取 Input。
+
+    GatewayResponse:
+      type: object
+      required: [trace_id, status]
+      description: 网关统一响应。data 为上游医保原始 JSON 响应。
+      properties:
+        trace_id:
+          type: string
+          format: uuid
+          description: 网关链路追踪 ID，也会写入审计表。
+        msgid:
+          type: string
+          description: 网关生成的医保报文 msgid。
+        infno:
+          type: string
+          description: 医保接口编号。
+        status:
+          type: string
+          enum: [success, failed, queued]
+          description: 网关处理状态。
+        data:
+          $ref: "#/components/schemas/MedicareResponse"
+        error:
+          type: string
+          description: 网关或上游错误描述。成功时通常为空。
+
+    MedicareResponse:
+      type: object
+      additionalProperties: true
+      description: 上游医保服务原始响应。不同 infno 的 output 结构不同。
+      properties:
+        infcode:
+          oneOf:
+            - type: integer
+            - type: string
+          description: 医保返回码，0 表示成功。
+          example: 0
+        err_msg:
+          type: string
+          description: 医保错误或成功信息。
+          example: success
+        output:
+          type: object
+          additionalProperties: true
+          description: 医保业务出参。
+        inf_refmsgid:
+          type: string
+          description: 医保服务参考消息号。
+        respond_time:
+          type: string
+          description: 医保服务响应时间。
+
+# 审计日志说明：
+# - medicare.sign_sessions：保存每次 9001 签到返回的 sign_no。
+# - medicare.audit_logs：保存每次调用的 trace_id、msgid、infno、ERP 单号、请求、响应、耗时、状态。
+# - medicare.async_tasks：保存异步任务状态。
+# 常用 SQL：
+# select created_at, infno, operation, status, erp_order_no, msgid, sign_no, error_message
+# from medicare.audit_logs
+# order by id desc
+# limit 20;

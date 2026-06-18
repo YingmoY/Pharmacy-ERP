@@ -1,0 +1,76 @@
+# External dependency not owned by this repository
+/MedicareAPISimulation/
+
+# Local machine helpers and private runtime configuration
+/service_manager.py
+/.env
+/.env.*
+!/.env.example
+
+# Backend local configuration and runtime artifacts
+/PharmacyERP/configs/config.local.yaml
+/PharmacyERP/configs/*.local.yaml
+/PharmacyERP/.gotmp/
+/PharmacyERP/tmp/
+/PharmacyERP/server_out.txt
+/PharmacyERP/server_err.txt
+/PharmacyERP/srv_stdout.txt
+/PharmacyERP/srv_stderr.txt
+/PharmacyERP/files/
+
+# AI service local configuration and Python artifacts
+/ai-services/.env
+/ai-services/.env.*
+!/ai-services/.env.example
+/ai-services/.venv/
+/ai-services/app/config.py
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Frontend dependencies and build output
+/PharmacyERP_front/node_modules/
+/PharmacyERP_front/dist/
+/PharmacyERP_front/components.d.ts
+
+# Medicare gateway local config, binaries, and generated outputs
+/medicare-gateway/.env
+/medicare-gateway/internal/config/config.go
+/medicare-gateway/.gocache/
+/medicare-gateway/gateway.exe
+/medicare-gateway/docs/generated/
+/medicare-gateway/last_interface_check.json
+/medicare-gateway/rabbitmq_*.json
+/medicare-gateway/rabbitmq_*.log
+
+# Duplicate archives and local reference bundles
+/references/*.zip
+/references/sample.jpg
+/references/sample.pdf
+/PharmacyERP/internal/*.zip
+
+# Go build/test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+go.work
+go.work.sum
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
